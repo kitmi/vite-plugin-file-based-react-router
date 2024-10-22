@@ -1,0 +1,27 @@
+{
+  "name": "vite-plugin-file-based-react-router",
+  "version": "0.0.1",
+  "description": "Vite plugin to generate file-based routes for react-router",
+  "main": "index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Rockie Guo <rockie@kitmi.com.au>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kitmi/vite-plugin-file-based-react-router.git"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "vite",
+    "plugin",
+    "react",
+    "router"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "lodash": "4.17.21"
+  }
+}
