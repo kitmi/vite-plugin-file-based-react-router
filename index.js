@@ -8,9 +8,11 @@ function splitLast(str, separator) {
     lastIndex === -1 ? null : str.substring(0, lastIndex),
     lastIndex === -1 ? str : str.substring(lastIndex + separator.length),
   ];
-};
+}
 
-const ensureEndsWith = (str, ending) => (str ? (str.endsWith(ending) ? str : str + ending) : ending);
+const trimStart = (str, starting) =>
+    str && str.startsWith(starting) ? str.substring(starting.length) : str;
+  
 
 /**
  * Vite plugin to generate routes based on the file system structure.
@@ -20,12 +22,13 @@ export default function generateRoutesPlugin(options = {}) {
     root = 'src', // Default to 'src' if not specified
     routesDir = 'pages',
     subRouters,
+    enabled = true,
   } = options;
 
   /**
    * Recursively build routes from the directory structure.
    */
-  async function buildRoutes(rootDir, currentDir, parentPath = '/') {
+  async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/') {
     let entries = await fs.readdir(currentDir, { withFileTypes: true });
     entries = entries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -39,31 +42,49 @@ export default function generateRoutesPlugin(options = {}) {
       if (entry.isDirectory()) {
         // Handle route groups (pattern to exclude from URL path)
         if (isRouteGroup(entry.name)) {
-          const children = await buildRoutes(rootDir, fullPath, parentPath);
+          const children = await buildRoutes(rootDir, fullPath, isRoot, parentPath);
           routes = routes.concat(children);
         } else {
-          const children = await buildRoutes(rootDir, fullPath, routePath);
+          const children = await buildRoutes(rootDir, fullPath, isRoot, routePath);
           routes.push({
             path: routePath,
             children,
           });
         }
       } else if (entry.isFile() && isRouteFile(entry.name)) {
-        const isLoader = entry.name.endsWith('.loader_.jsx');
-        const isAnyDeeper = entry.name.startsWith('_any.');
+        const isLoader = entry.name.endsWith('.loader_.js');
         const componentName = generateComponentName(relativePath, isLoader);
+        const isAnyDeeper = entry.name.startsWith('_any.');
         const isLazy = entry.name.endsWith('.lazy_.jsx');
         const isIndex = entry.name.startsWith('index.');
         const isLayout = entry.name.startsWith('_layout.');
         const isError = entry.name.startsWith('_error.');
 
+        if (isIndex) {
+          if (entry.name !== 'index.jsx' && entry.name !== 'index.lazy_.jsx' && entry.name !== 'index.loader_.js') {
+            throw new Error(`Index route does not support flat mode. File: ${fullPath}`);
+          }
+        }
+
+        if (isAnyDeeper) {
+          if (isLoader) {
+            throw new Error(`"/*" route does not support loader. File: ${fullPath}`);
+          }
+        }
+
+        if (isLayout && isLazy) {
+            throw new Error(`Layout route does not support lazy, you can use a lazy sub-module instead. File: ${fullPath}`);
+        }
+
         let importPath = `./${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
         if (importPath.endsWith('.jsx')) {
           importPath = importPath.slice(0, -4);
+        } else if (importPath.endsWith('.js')) {
+          importPath = importPath.slice(0, -3);
         }
 
         const route = {
-          path: isIndex ? parentPath : isAnyDeeper ? routePath + '/*' : routePath,
+          path: isIndex ? parentPath : routePath,
           element: componentName,
           importPath,
           isLoader,
@@ -87,7 +108,7 @@ export default function generateRoutesPlugin(options = {}) {
       ? path.resolve(sourcePath, 'routes.runtime.jsx')
       : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
 
-    const routes = await buildRoutes(routesPath, routesPath);
+    const routes = await buildRoutes(routesPath, routesPath, isRoot);
     //console.dir(routes, { depth: null });
 
     const fileContent = generateRoutesFileContent(routes, isRoot ? subRouters : undefined, isRoot);
@@ -99,6 +120,10 @@ export default function generateRoutesPlugin(options = {}) {
   return {
     name: 'vite-plugin-file-based-react-router',
     async buildStart() {
+      if (!enabled) {
+        return;
+      }
+
       await buildRoutesFromDirectory(root, true);
 
       for (let key in subRouters) {
@@ -117,7 +142,7 @@ function buildRoutePath(name, parentPath) {
 
   // Remove file extension
   routeSegment = routeSegment.replace(/\.lazy_\.jsx$/, '');
-  routeSegment = routeSegment.replace(/\.loader_\.jsx$/, '');
+  routeSegment = routeSegment.replace(/\.loader_\.js$/, '');
   routeSegment = routeSegment.replace(/\.jsx$/, '');
 
   // Handle special files
@@ -152,7 +177,7 @@ function isRouteGroup(name) {
  * Check if a file should be treated as a route file.
  */
 function isRouteFile(name) {
-  return name.endsWith('.jsx');
+  return name.endsWith('.jsx') || name.endsWith('.loader_.js');
 }
 
 /**
@@ -163,6 +188,7 @@ function generateComponentName(relativePath, isLoader) {
     .replace(/[\/\\]/g, '_')
     .replace(/\.lazy_\.jsx$/, '')
     .replace(/\.jsx$/, '')
+    .replace(/\.js$/, '')
     //.replace(/_any$/, '')
     .replace(/\[(.+?)\]/g, '_')
     .replace(/[^a-zA-Z0-9_]/g, '');
@@ -176,9 +202,9 @@ function generateComponentName(relativePath, isLoader) {
   return _.upperFirst(componentName);
 }
 
-const KEY_ORDERS = ['index', 'path', 'element', 'errorElement', 'loader', 'handle'];
+const KEY_ORDERS = ['index', 'path', 'element', 'errorElement', 'loader', 'handle', 'lazy'];
 
-function tidyRoutes(routes, parentPath = '/') {
+function tidyRoutes(routes, isRoot, parentPath = '/') {
   return routes
     .map((route) => {
       // reorder properties
@@ -186,20 +212,23 @@ function tidyRoutes(routes, parentPath = '/') {
       for (const key of KEY_ORDERS) {
         if (key in route) {
           orderedRoute[key] = route[key];
+          if (!isRoot && key === 'path') {
+            orderedRoute[key] = trimStart(orderedRoute[key], '/');
+          }
         }
       }
 
       if (route.children && route.children.length > 0) {
         // for path only routes, move children to parent
         if (Object.keys(orderedRoute).length === 1 && 'path' in orderedRoute) {
-          const [onlyChild] = tidyRoutes(route.children);
+          const [onlyChild] = tidyRoutes(route.children, isRoot);
           if (onlyChild.index) {
             delete onlyChild.index;
             onlyChild.path = orderedRoute.path;
           }
           return onlyChild;
         } else {
-          orderedRoute.children = tidyRoutes(route.children, route.path);
+          orderedRoute.children = tidyRoutes(route.children, isRoot, route.path);
         }
       }
 
@@ -238,37 +267,6 @@ function tidyRoutes(routes, parentPath = '/') {
     });
 }
 
-function routeToJsx(route, indent) {
-  const space = ' '.repeat(indent*2);
-  let result = space + '<Route ';
-  for (let key in route) {
-    if (key === 'children') {
-      continue;
-    }
-
-    let value = route[key];
-    if (typeof value === 'boolean') {
-      if (value) {
-        result += `${key} `;
-      }
-    } else if (key === 'element' || key === 'errorElement' || key === 'loader' || key === 'handle') {
-      result += `${key}={${value}} `;
-    } else {
-      result += `${key}="${value}" `;
-    }
-  }
-
-  if (route.children && route.children.length > 0) {
-    result += '>\n';
-    result += route.children.map((child) => routeToJsx(child, indent+1)).join('\n');
-    result += '\n' + space + '</Route>';
-  } else {
-    result += '/>';
-  }
-
-  return result;
-}
-
 /**
  * Generate the content of the routes.runtime.jsx file.
  */
@@ -299,7 +297,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
       let merged = false;
       let isNode = false;
 
-      const { path, element, importPath, isLazy, isLoader, isLayout, isError, isIndex, children } = route;
+      const { path, element, importPath, isLazy, isLoader, isLayout, isError, isIndex, isAnyDeeper, children } = route;
 
       // 处理路径或索引
       routeDef.path = path;
@@ -324,7 +322,11 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
         } else if (isError) {
           // 处理错误元素
           if (!importSet.has(importPath)) {
-            importStatements += `import ${componentName} from '${importPath}';\n`;
+            if (isLazy) {
+                lazyImports += `const ${componentName} = React.lazy(() => import('${importPath}'));\n`;
+            } else {
+                importStatements += `import ${componentName} from '${importPath}';\n`;
+            }
             importSet.add(importPath);
           }
 
@@ -340,7 +342,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           // 处理布局和 handle
           const handleName = `handle${componentName}`;
           if (!importSet.has(importPath)) {
-            importStatements += `import ${componentName}, { metadata as ${handleName} } from '${importPath}';\n`;
+            importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
             importSet.add(importPath);
           }
 
@@ -353,54 +355,49 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
             routeDef.handle = handleName;
             routeMergeMap[routeDef.path] = routeDef;
           }
-        } else if (isLazy) {
+        } else if (isAnyDeeper) {
           // 处理懒加载组件
           if (!importSet.has(importPath)) {
-            lazyImports += `const ${componentName} = lazy(() => import('${importPath}'));\n`;
+            lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
             importSet.add(importPath);
           }
-          routeDef.element = `<${componentName} />`;
+
+          routeDef.handle = '{ lazyRouting: lazy' + componentName + ' }';
+          isNode = true;
+        } else if (isLazy) {
+          // 处理懒加载组件          
+          if (!importSet.has(importPath)) {
+            lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
+            importSet.add(importPath);
+          }
+          routeDef.lazy = 'lazy' + componentName;
           isNode = true;
         } else {
           // 普通组件
+          const handleName = `handle${componentName}`;
           if (!importSet.has(importPath)) {
-            importStatements += `import ${componentName} from '${importPath}';\n`;
+            importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
             importSet.add(importPath);
           }
           routeDef.element = `<${componentName} />`;
+          routeDef.handle = handleName;
           isNode = true;
         }
       }
 
       // 处理子路由
       if (children && children.length > 0) {
-        //console.log('children', { path: routeDef.path, pathExist: routeDef.path in routeMergeMap });
-
         if (routeMergeMap[routeDef.path]) {
           routeMergeMap[routeDef.path].children = processRoutes(children);
         } else {
           routeMergeMap[routeDef.path] = routeDef;
           const moreChildren = processRoutes(children);
           routeDef.children = [...(routeDef.children || []), ...moreChildren];
-          //   console.log({
-          //     path: routeDef.path,
-          //     parentPath,
-          //     processedChildren: routeDef.children.length,
-          //   });
-          //   console.log('push to parent', parentPath, routeMergeMap[parentPath].children);
           routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
         }
 
         merged = true;
       }
-
-      //   console.log({
-      //     isNode,
-      //     merged,
-      //     parentPath,
-      //     pathExist: routeDef.path in routeMergeMap,
-      //     ...routeDef,
-      //   });
 
       if (isNode) {
         let p = parentPath;
@@ -412,8 +409,6 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
         }
 
         const _parentPath = findNearestParent(p);
-
-        //console.log('push to parent 2', _parentPath, routeMergeMap[_parentPath].children);
         routeMergeMap[_parentPath].children = [...(routeMergeMap[_parentPath].children || []), routeDef];
       } else if (!merged) {
         // 添加到路由定义数组
@@ -429,23 +424,20 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
   if (subRoutes) {
     for (let _path in subRoutes) {
       const routeInfo = subRoutes[_path];
-      if (!_path.endsWith('/*')) {
-        _path = ensureEndsWith(_path, '/');
-        _path += '*';
-      }
 
       const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';
       const importPath = './' + path.join(routeInfo.importPath, 'sub-routes.runtime');
 
       let routeDef = {
-        path: _path,
-        element: `<${componentName} />`,
+        path: _path,        
       };
 
       if (routeInfo.isLazy) {
-        lazyImports += `const ${componentName} = lazy(() => import('${importPath}'));\n`;
+        lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
+        routeDef.handle = `{ lazyRouting: lazy${componentName} }`;
       } else {
         importStatements += `import ${componentName} from '${importPath}';\n`;
+        routeDef.element = `<${componentName} />`;
       }
 
       importSet.add(importPath);
@@ -459,46 +451,52 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
     }
   }
 
-  const routesArray = tidyRoutes(_routes);
+  const routesArray = tidyRoutes(_routes, isRoot);
+
+  // 生成路由配置的字符串表示
+  const routeDefsString = JSON.stringify(routesArray, null, 2)
+  // 处理 element 属性，移除引号
+  .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
+  .replace(/"lazy": "([^"]+)"/g, '"lazy": $1')
+  // 处理 errorElement 属性
+  .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
+  // 处理 loader 属性
+  .replace(/"loader": "([a-zA-Z0-9_]+)"/g, '"loader": $1')
+  // 处理 handle 属性
+  .replace(/("handle":\s*)"({[^"]*})"/g, '$1$2')
+  .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
+  // 移除 element 为 null 的情况
+  .replace(/"element": null,\n/g, '')
+  // 移除 JSX 元素周围的引号
+  .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1');
+
   let fileContent;
 
   if (isRoot) {
-    // 生成路由配置的字符串表示
-
-    const routeDefsString = JSON.stringify(routesArray, null, 2)
-      // 处理 element 属性，移除引号
-      .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
-      // 处理 errorElement 属性
-      .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
-      // 处理 loader 属性
-      .replace(/"loader": "([a-zA-Z0-9_]+)"/g, '"loader": $1')
-      // 处理 handle 属性
-      .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
-      // 移除 element 为 null 的情况
-      .replace(/"element": null,\n/g, '')
-      // 移除 JSX 元素周围的引号
-      .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1');
-
     // 生成最终的文件内容
-    fileContent = `import { lazy } from 'react';
+    fileContent = `import React from 'react';
 ${importStatements}
 ${lazyImports}
+export const lazyRouting = async ({ patch, matches }) => {
+  let leafRoute = matches[matches.length - 1]?.route;
+
+  if (leafRoute?.handle?.lazyRouting) {
+    const { default: children } = await leafRoute.handle.lazyRouting();
+    patch(leafRoute.id, children);
+  }
+};
+
 const routes = ${routeDefsString};
 
 export default routes;
 `;
   } else {
-    fileContent = `import { lazy } from 'react';
-import { Routes, Route } from 'react-router-dom';
+    fileContent = `import React from 'react';
 ${importStatements}
 ${lazyImports}
-const SubRoutes = () => (
-  <Routes>
-${routesArray.map((route) => routeToJsx(route, 2)).join('\n')}
-  </Routes>
-);
+const subRoutes = ${routeDefsString};
 
-export default SubRoutes;
+export default subRoutes;
 `;
   }
 
