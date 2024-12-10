@@ -10,9 +10,7 @@ function splitLast(str, separator) {
   ];
 }
 
-const trimStart = (str, starting) =>
-    str && str.startsWith(starting) ? str.substring(starting.length) : str;
-  
+const trimStart = (str, starting) => (str && str.startsWith(starting) ? str.substring(starting.length) : str);
 
 /**
  * Vite plugin to generate routes based on the file system structure.
@@ -24,6 +22,10 @@ export default function generateRoutesPlugin(options = {}) {
     subRouters,
     enabled = true,
   } = options;
+
+  const moduleMap = {};
+  let routesPattern = routesDir.startsWith('/') ? routesDir : `/${routesDir}`;
+  routesPattern = routesPattern.endsWith('/') ? routesPattern : `${routesPattern}/`;
 
   /**
    * Recursively build routes from the directory structure.
@@ -53,12 +55,15 @@ export default function generateRoutesPlugin(options = {}) {
         }
       } else if (entry.isFile() && isRouteFile(entry.name)) {
         const isLoader = entry.name.endsWith('.loader_.js');
-        const componentName = generateComponentName(relativePath, isLoader);
         const isAnyDeeper = entry.name.startsWith('_any.');
         const isLazy = entry.name.endsWith('.lazy_.jsx');
         const isIndex = entry.name.startsWith('index.');
         const isLayout = entry.name.startsWith('_layout.');
         const isError = entry.name.startsWith('_error.');
+        let componentName = generateComponentName(relativePath, isLoader);
+        if (isError) {
+          componentName += 'Boundary';
+        }
 
         if (isIndex) {
           if (entry.name !== 'index.jsx' && entry.name !== 'index.lazy_.jsx' && entry.name !== 'index.loader_.js') {
@@ -73,7 +78,9 @@ export default function generateRoutesPlugin(options = {}) {
         }
 
         if (isLayout && isLazy) {
-            throw new Error(`Layout route does not support lazy, you can use a lazy sub-module instead. File: ${fullPath}`);
+          throw new Error(
+            `Layout route does not support lazy, you can use a lazy sub-module instead. File: ${fullPath}`
+          );
         }
 
         let importPath = `./${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
@@ -104,6 +111,8 @@ export default function generateRoutesPlugin(options = {}) {
 
   async function buildRoutesFromDirectory(sourcePath, isRoot) {
     const routesPath = path.resolve(sourcePath, routesDir);
+    moduleMap[routesPath] = { sourcePath, isRoot };
+
     const outputFile = isRoot
       ? path.resolve(sourcePath, 'routes.runtime.jsx')
       : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
@@ -129,6 +138,17 @@ export default function generateRoutesPlugin(options = {}) {
       for (let key in subRouters) {
         const routeInfo = subRouters[key];
         await buildRoutesFromDirectory(path.join(root, routeInfo.importPath), false);
+      }
+    },
+
+    async watchChange(id) {
+      const pos = id.indexOf(routesPattern);
+      if (pos !== -1) {
+        const modulePath = id.substring(0, pos + routesPattern.length - 1);
+        const mdouleInfo = moduleMap[modulePath];
+        if (mdouleInfo != null) {
+          await buildRoutesFromDirectory(mdouleInfo.sourcePath, mdouleInfo.isRoot);
+        }
       }
     },
   };
@@ -205,6 +225,8 @@ function generateComponentName(relativePath, isLoader) {
 const KEY_ORDERS = ['index', 'path', 'element', 'errorElement', 'loader', 'handle', 'lazy'];
 
 function tidyRoutes(routes, isRoot, parentPath = '/') {
+  if (typeof routes === 'string') return routes;
+
   return routes
     .map((route) => {
       // reorder properties
@@ -323,9 +345,9 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           // 处理错误元素
           if (!importSet.has(importPath)) {
             if (isLazy) {
-                lazyImports += `const ${componentName} = React.lazy(() => import('${importPath}'));\n`;
+              lazyImports += `const ${componentName} = React.lazy(() => import('${importPath}'));\n`;
             } else {
-                importStatements += `import ${componentName} from '${importPath}';\n`;
+              importStatements += `import ${componentName} from '${importPath}';\n`;
             }
             importSet.add(importPath);
           }
@@ -365,7 +387,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           routeDef.handle = '{ lazyRouting: lazy' + componentName + ' }';
           isNode = true;
         } else if (isLazy) {
-          // 处理懒加载组件          
+          // 处理懒加载组件
           if (!importSet.has(importPath)) {
             lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
             importSet.add(importPath);
@@ -429,11 +451,21 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
       const importPath = './' + path.join(routeInfo.importPath, 'sub-routes.runtime');
 
       let routeDef = {
-        path: _path,        
+        path: _path,
       };
 
       if (routeInfo.isLazy) {
+        if (!routeInfo.defaultRoute || routeInfo.defaultRoute === '/') {
+          throw new Error(`Default route is required for lazy sub-routes: "${_path}" and it should not be "/".`);
+        }
+        if (!importSet.has('react-router-dom')) {
+          importStatements += `import { redirect } from 'react-router-dom';\n`;
+          importSet.add('react-router-dom');
+        }
+
         lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
+        const redirectPath = path.join(_path, routeInfo.defaultRoute).replace(/\\/g, '/');
+        routeDef.children = `[{ index: true, loader: () => redirect('${redirectPath}') }]`;        
         routeDef.handle = `{ lazyRouting: lazy${componentName} }`;
       } else {
         importStatements += `import ${componentName} from '${importPath}';\n`;
@@ -455,20 +487,23 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
 
   // 生成路由配置的字符串表示
   const routeDefsString = JSON.stringify(routesArray, null, 2)
-  // 处理 element 属性，移除引号
-  .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
-  .replace(/"lazy": "([^"]+)"/g, '"lazy": $1')
-  // 处理 errorElement 属性
-  .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
-  // 处理 loader 属性
-  .replace(/"loader": "([a-zA-Z0-9_]+)"/g, '"loader": $1')
-  // 处理 handle 属性
-  .replace(/("handle":\s*)"({[^"]*})"/g, '$1$2')
-  .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
-  // 移除 element 为 null 的情况
-  .replace(/"element": null,\n/g, '')
-  // 移除 JSX 元素周围的引号
-  .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1');
+    // 处理 element 属性，移除引号
+    .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
+    .replace(/"lazy": "([^"]+)"/g, '"lazy": $1')
+    // 处理 errorElement 属性
+    .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
+    // 处理 loader 属性
+    .replace(/"loader": "([a-zA-Z0-9_]+)"/g, '"loader": $1')
+    // 处理 handle 属性
+    .replace(/("handle":\s*)"({[^"]*})"/g, '$1$2')
+    .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
+    // 移除 element 为 null 的情况
+    .replace(/"element": null,\n/g, '')
+    // 移除 JSX 元素周围的引号
+    .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1')
+    // 移除 children 为字符串的情况
+    .replace(/"children": "([^"]+)"/g, '"children": $1')    
+    ;
 
   let fileContent;
 
