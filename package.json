@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-file-based-react-router",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Vite plugin to generate file-based routes for react-router",
   "main": "index.js",
   "type": "module",
@@ -23,6 +23,8 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "lodash": "4.17.21"
+    "lodash": "4.17.21",
+    "read-package-up": "^11.0.0",
+    "resolve": "^1.22.9"
   }
 }

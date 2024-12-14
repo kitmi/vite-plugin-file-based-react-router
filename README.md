@@ -22,6 +22,8 @@ Inspired from `tanstack.com/router`, but without **TypeScript**.
 
     [Refers to React Router's handle usage](https://reactrouter.com/en/main/hooks/use-matches#breadcrumbs)
 
+- [x] supports routing to a sub module as a npm package
+
 ## To-do
 
 - [ ] unit tests

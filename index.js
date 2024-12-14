@@ -1,6 +1,8 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import _ from 'lodash';
+import resolve from 'resolve';
+import { readPackageUpSync } from 'read-package-up';
 
 function splitLast(str, separator) {
   const lastIndex = str.lastIndexOf(separator);
@@ -11,6 +13,8 @@ function splitLast(str, separator) {
 }
 
 const trimStart = (str, starting) => (str && str.startsWith(starting) ? str.substring(starting.length) : str);
+
+const isLocalModule = (subModule) => subModule.importPath.startsWith('.') || subModule.importPath.startsWith('/');
 
 /**
  * Vite plugin to generate routes based on the file system structure.
@@ -23,6 +27,8 @@ export default function generateRoutesPlugin(options = {}) {
     enabled = true,
   } = options;
 
+  const rootPath = path.resolve(root);   
+
   const moduleMap = {};
   let routesPattern = routesDir.startsWith('/') ? routesDir : `/${routesDir}`;
   routesPattern = routesPattern.endsWith('/') ? routesPattern : `${routesPattern}/`;
@@ -30,7 +36,7 @@ export default function generateRoutesPlugin(options = {}) {
   /**
    * Recursively build routes from the directory structure.
    */
-  async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/') {
+  async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/', nodeModule) {
     let entries = await fs.readdir(currentDir, { withFileTypes: true });
     entries = entries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -44,10 +50,10 @@ export default function generateRoutesPlugin(options = {}) {
       if (entry.isDirectory()) {
         // Handle route groups (pattern to exclude from URL path)
         if (isRouteGroup(entry.name)) {
-          const children = await buildRoutes(rootDir, fullPath, isRoot, parentPath);
+          const children = await buildRoutes(rootDir, fullPath, isRoot, parentPath, nodeModule);
           routes = routes.concat(children);
         } else {
-          const children = await buildRoutes(rootDir, fullPath, isRoot, routePath);
+          const children = await buildRoutes(rootDir, fullPath, isRoot, routePath, nodeModule);
           routes.push({
             path: routePath,
             children,
@@ -83,7 +89,7 @@ export default function generateRoutesPlugin(options = {}) {
           );
         }
 
-        let importPath = `./${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
+        let importPath = (nodeModule ? subRouters[nodeModule].importPath : '.') + `/${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
         if (importPath.endsWith('.jsx')) {
           importPath = importPath.slice(0, -4);
         } else if (importPath.endsWith('.js')) {
@@ -109,15 +115,17 @@ export default function generateRoutesPlugin(options = {}) {
     return routes;
   }
 
-  async function buildRoutesFromDirectory(sourcePath, isRoot) {
+  async function buildRoutesFromDirectory(sourcePath, isRoot, nodeModule) {
     const routesPath = path.resolve(sourcePath, routesDir);
     moduleMap[routesPath] = { sourcePath, isRoot };
 
     const outputFile = isRoot
       ? path.resolve(sourcePath, 'routes.runtime.jsx')
-      : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
+      : (nodeModule ?  
+          path.resolve(rootPath, `sub-routes-${_.kebabCase(nodeModule)}.runtime.jsx`)
+      : path.resolve(sourcePath, 'sub-routes.runtime.jsx'));
 
-    const routes = await buildRoutes(routesPath, routesPath, isRoot);
+    const routes = await buildRoutes(routesPath, routesPath, isRoot, '/', nodeModule);
     //console.dir(routes, { depth: null });
 
     const fileContent = generateRoutesFileContent(routes, isRoot ? subRouters : undefined, isRoot);
@@ -133,11 +141,25 @@ export default function generateRoutesPlugin(options = {}) {
         return;
       }
 
-      await buildRoutesFromDirectory(root, true);
+      await buildRoutesFromDirectory(root, true);      
 
       for (let key in subRouters) {
         const routeInfo = subRouters[key];
-        await buildRoutesFromDirectory(path.join(root, routeInfo.importPath), false);
+
+        let importPath;
+        let nodeModule;
+
+        if (isLocalModule(routeInfo)) {
+          importPath = path.join(root, routeInfo.importPath);
+        } else {
+          const mainFile = resolve.sync(routeInfo.importPath, { basedir: rootPath });
+          const { path: pkgJsonPath } = readPackageUpSync({ cwd: path.dirname(mainFile) });
+          const packageRoot = path.dirname(pkgJsonPath);
+          importPath = path.join(packageRoot, root);
+          nodeModule = key;
+        }
+
+        await buildRoutesFromDirectory(importPath, false, nodeModule);
       }
     },
 
@@ -146,8 +168,8 @@ export default function generateRoutesPlugin(options = {}) {
       if (pos !== -1) {
         const modulePath = id.substring(0, pos + routesPattern.length - 1);
         const mdouleInfo = moduleMap[modulePath];
-        if (mdouleInfo != null) {
-          await buildRoutesFromDirectory(mdouleInfo.sourcePath, mdouleInfo.isRoot);
+        if (mdouleInfo != null) {           
+          await buildRoutesFromDirectory(mdouleInfo.sourcePath, mdouleInfo.isRoot, isLocalModule(mdouleInfo) ? undefined : modulePath);
         }
       }
     },
@@ -447,8 +469,8 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
     for (let _path in subRoutes) {
       const routeInfo = subRoutes[_path];
 
-      const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';
-      const importPath = './' + path.join(routeInfo.importPath, 'sub-routes.runtime');
+      const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';            
+      const importPath = './' +  (isLocalModule(routeInfo) ? path.join(routeInfo.importPath, 'sub-routes.runtime') : `sub-routes-${_.kebabCase(_path)}.runtime`);
 
       let routeDef = {
         path: _path,
