@@ -27,7 +27,7 @@ export default function generateRoutesPlugin(options = {}) {
     enabled = true,
   } = options;
 
-  const rootPath = path.resolve(root);   
+  const rootPath = path.resolve(root);
 
   const moduleMap = {};
   let routesPattern = routesDir.startsWith('/') ? routesDir : `/${routesDir}`;
@@ -38,7 +38,7 @@ export default function generateRoutesPlugin(options = {}) {
    */
   async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/', nodeModule) {
     let entries = await fs.readdir(currentDir, { withFileTypes: true });
-    entries = entries.sort((a, b) => a.name.localeCompare(b.name));
+    entries = entries.sort((a, b) => (a.name < b.name || b.name.startsWith('_any.') ? -1 : (a.name > b.name || a.name.startsWith('_any.') ? 1 : 0)));
 
     let routes = [];
 
@@ -89,7 +89,9 @@ export default function generateRoutesPlugin(options = {}) {
           );
         }
 
-        let importPath = (nodeModule ? subRouters[nodeModule].importPath : '.') + `/${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
+        let importPath =
+          (nodeModule ? subRouters[nodeModule].importPath : '.') +
+          `/${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
         if (importPath.endsWith('.jsx')) {
           importPath = importPath.slice(0, -4);
         } else if (importPath.endsWith('.js')) {
@@ -97,7 +99,7 @@ export default function generateRoutesPlugin(options = {}) {
         }
 
         const route = {
-          path: isIndex ? parentPath : routePath,
+          path: isAnyDeeper ? routePath + (routePath.endsWith('/') ? '*' : '/*') : isIndex ? parentPath : routePath,
           element: componentName,
           importPath,
           isLoader,
@@ -117,13 +119,13 @@ export default function generateRoutesPlugin(options = {}) {
 
   async function buildRoutesFromDirectory(sourcePath, isRoot, nodeModule) {
     const routesPath = path.resolve(sourcePath, routesDir);
-    moduleMap[routesPath] = { sourcePath, isRoot };
+    moduleMap[routesPath] = { sourcePath, isRoot, key: nodeModule };
 
     const outputFile = isRoot
       ? path.resolve(sourcePath, 'routes.runtime.jsx')
-      : (nodeModule ?  
-          path.resolve(rootPath, `sub-routes-${_.kebabCase(nodeModule)}.runtime.jsx`)
-      : path.resolve(sourcePath, 'sub-routes.runtime.jsx'));
+      : nodeModule
+        ? path.resolve(rootPath, `sub-routes-${_.kebabCase(nodeModule)}.runtime.jsx`)
+        : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
 
     const routes = await buildRoutes(routesPath, routesPath, isRoot, '/', nodeModule);
     //console.dir(routes, { depth: null });
@@ -141,7 +143,7 @@ export default function generateRoutesPlugin(options = {}) {
         return;
       }
 
-      await buildRoutesFromDirectory(root, true);      
+      await buildRoutesFromDirectory(root, true);
 
       for (let key in subRouters) {
         const routeInfo = subRouters[key];
@@ -168,8 +170,12 @@ export default function generateRoutesPlugin(options = {}) {
       if (pos !== -1) {
         const modulePath = id.substring(0, pos + routesPattern.length - 1);
         const mdouleInfo = moduleMap[modulePath];
-        if (mdouleInfo != null) {           
-          await buildRoutesFromDirectory(mdouleInfo.sourcePath, mdouleInfo.isRoot, isLocalModule(mdouleInfo) ? undefined : modulePath);
+        if (mdouleInfo != null) {
+          await buildRoutesFromDirectory(
+            mdouleInfo.sourcePath,
+            mdouleInfo.isRoot,
+            mdouleInfo.isRoot || isLocalModule(mdouleInfo) ? undefined : mdouleInfo.key
+          );
         }
       }
     },
@@ -325,6 +331,10 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
       return start;
     }
 
+    if (start === '/') {
+      return '/';
+    }
+
     let [parentPath] = splitLast(start, '/');
     if (!parentPath) {
       parentPath = '/';
@@ -399,15 +409,6 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
             routeDef.handle = handleName;
             routeMergeMap[routeDef.path] = routeDef;
           }
-        } else if (isAnyDeeper) {
-          // 处理懒加载组件
-          if (!importSet.has(importPath)) {
-            lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
-            importSet.add(importPath);
-          }
-
-          routeDef.handle = '{ lazyRouting: lazy' + componentName + ' }';
-          isNode = true;
         } else if (isLazy) {
           // 处理懒加载组件
           if (!importSet.has(importPath)) {
@@ -452,6 +453,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           delete routeDef.path;
         }
 
+        console.log({ p, path: routeDef.path, routeMergeMap });
         const _parentPath = findNearestParent(p);
         routeMergeMap[_parentPath].children = [...(routeMergeMap[_parentPath].children || []), routeDef];
       } else if (!merged) {
@@ -469,8 +471,12 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
     for (let _path in subRoutes) {
       const routeInfo = subRoutes[_path];
 
-      const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';            
-      const importPath = './' +  (isLocalModule(routeInfo) ? path.join(routeInfo.importPath, 'sub-routes.runtime') : `sub-routes-${_.kebabCase(_path)}.runtime`);
+      const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';
+      const importPath =
+        './' +
+        (isLocalModule(routeInfo)
+          ? path.join(routeInfo.importPath, 'sub-routes.runtime')
+          : `sub-routes-${_.kebabCase(_path)}.runtime`);
 
       let routeDef = {
         path: _path,
@@ -487,7 +493,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
 
         lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
         const redirectPath = path.join(_path, routeInfo.defaultRoute).replace(/\\/g, '/');
-        routeDef.children = `[{ index: true, loader: () => redirect('${redirectPath}') }]`;        
+        routeDef.children = `[{ index: true, loader: () => redirect('${redirectPath}') }]`;
         routeDef.handle = `{ lazyRouting: lazy${componentName} }`;
       } else {
         importStatements += `import ${componentName} from '${importPath}';\n`;
@@ -524,9 +530,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
     // 移除 JSX 元素周围的引号
     .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1')
     // 移除 children 为字符串的情况
-    .replace(/"children": "([^"]+)"/g, '"children": $1')    
-    ;
-
+    .replace(/"children": "([^"]+)"/g, '"children": $1');
   let fileContent;
 
   if (isRoot) {
