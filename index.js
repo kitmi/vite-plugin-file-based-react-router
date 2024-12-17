@@ -453,7 +453,6 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           delete routeDef.path;
         }
 
-        console.log({ p, path: routeDef.path, routeMergeMap });
         const _parentPath = findNearestParent(p);
         routeMergeMap[_parentPath].children = [...(routeMergeMap[_parentPath].children || []), routeDef];
       } else if (!merged) {
