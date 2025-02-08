@@ -38,7 +38,9 @@ export default function generateRoutesPlugin(options = {}) {
    */
   async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/', nodeModule) {
     let entries = await fs.readdir(currentDir, { withFileTypes: true });
-    entries = entries.sort((a, b) => (a.name < b.name || b.name.startsWith('_any.') ? -1 : (a.name > b.name || a.name.startsWith('_any.') ? 1 : 0)));
+    entries = entries.sort((a, b) =>
+      a.name < b.name || b.name.startsWith('_any.') ? -1 : a.name > b.name || a.name.startsWith('_any.') ? 1 : 0
+    );
 
     let routes = [];
 
@@ -345,6 +347,7 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
 
   function processRoutes(routes) {
     const routeDefinitions = [];
+    const _deferred = [];
 
     for (const route of routes) {
       const routeDef = {};
@@ -438,7 +441,12 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
           routeMergeMap[routeDef.path] = routeDef;
           const moreChildren = processRoutes(children);
           routeDef.children = [...(routeDef.children || []), ...moreChildren];
-          routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
+
+          if (!routeMergeMap[parentPath]) {
+            _deferred.push({ parentPath, routeDef });
+          } else {
+            routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
+          }
         }
 
         merged = true;
@@ -458,6 +466,12 @@ function generateRoutesFileContent(routes, subRoutes, isRoot) {
       } else if (!merged) {
         // 添加到路由定义数组
         routeDefinitions.push(routeDef);
+      }
+    }
+
+    if (_deferred.length > 0) {
+      for (const { parentPath, routeDef } of _deferred) {
+        routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
       }
     }
 
