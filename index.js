@@ -68,6 +68,7 @@ export default function generateRoutesPlugin(options = {}) {
         const isIndex = entry.name.startsWith('index.');
         const isLayout = entry.name.startsWith('_layout.');
         const isError = entry.name.startsWith('_error.');
+
         let componentName = generateComponentName(relativePath, isLoader);
         if (isError) {
           componentName += 'Boundary';
@@ -240,7 +241,7 @@ function generateComponentName(relativePath, isLoader) {
     .replace(/\.jsx$/, '')
     .replace(/\.js$/, '')
     //.replace(/_any$/, '')
-    .replace(/\[(.+?)\]/g, '_')
+    .replace(/\[(.+?)\]/g, '$1')
     .replace(/[^a-zA-Z0-9_]/g, '');
 
   componentName = _.camelCase(componentName);
