@@ -1,4 +1,4 @@
-import { promises as fs } from 'fs';
+import fsSync, { promises as fs } from 'fs';
 import path from 'path';
 import _ from 'lodash';
 import resolve from 'resolve';
@@ -16,6 +16,147 @@ const trimStart = (str, starting) => (str && str.startsWith(starting) ? str.subs
 
 const isLocalModule = (subModule) => subModule.importPath.startsWith('.') || subModule.importPath.startsWith('/');
 
+const getPackageRoot = (packageImport, rootPath) => {
+  const mainFile = resolve.sync(packageImport, { basedir: rootPath });
+  const { path: pkgJsonPath } = readPackageUpSync({ cwd: path.dirname(mainFile) });
+  return path.dirname(pkgJsonPath);
+};
+
+export const copyAssets = (list, srcBase, destBase, fromEntity) => {
+  if (list) {
+    _.each(list, (dest, src) => {
+      const destPath = path.resolve(destBase, dest);
+      const alreadyExist = fsSync.existsSync(destPath);
+      fsSync.mkdirSync(path.dirname(destPath), { recursive: true });
+      fsSync.copyFileSync(path.resolve(srcBase, src), destPath);
+      if (alreadyExist && fromEntity) {
+        console.log(`Overrided "${destPath}" from ${fromEntity}`);
+      } else {
+        console.log(`Copied "${destPath}"` + (fromEntity ? ` from ${fromEntity}` : ''));
+      }
+    });
+  }
+};
+
+export const generateRuntimeConfig = (i18nNamespaces, svgIcons) => {
+  // Saved i18n namespaces and svgicon prefix into runtime config
+  const runtimeConfigFile = './src/runtime.config.json';
+  let runtimeConfig;
+
+  if (fsSync.existsSync(runtimeConfigFile)) {
+    runtimeConfig = JSON.parse(fsSync.readFileSync(runtimeConfigFile, 'utf-8'));
+  } else {
+    runtimeConfig = {};
+  }
+
+  runtimeConfig.i18n = { ns: i18nNamespaces };
+  runtimeConfig.svgIconPrefix = svgIcons.symbolIdPrefix;
+  fsSync.writeFileSync('./src/runtime.config.json', JSON.stringify(runtimeConfig, null, 2));
+  console.log('"i18n" namespaces updated in "./src/runtime.config.json"');
+};
+
+export const processSubModules = (subModules, mainRoot = 'src') => {
+  const rootPath = path.resolve(mainRoot);
+
+  const sitemap = {};
+  const subRouters = {};
+  const i18nNamespaces = new Set();
+  const i18nToCopy = ['./node_modules/@xgent/grafton/dist'];
+  const i18nToExtract = [];
+
+  subModules.forEach((module) => {
+    if (module.enabled) {
+      const isLocal = isLocalModule(module);
+
+      if (module.mode === 'builtin') {
+        if (!isLocal) {
+          throw new Error(
+            `Built-in module path must be a relative path to "${mainRoot}". Module: ${module.importPath}`
+          );
+        }
+      } else {
+        if (isLocal) {
+          throw new Error(`External module path must be a package name. Module: ${module.importPath}`);
+        }
+      }
+
+      // merge sitemap and extract sub-routers settings
+      const moduleRoot = isLocal ? path.join(rootPath, module.importPath) : getPackageRoot(module.importPath, rootPath);
+      const sitemapPath = path.resolve(moduleRoot, 'sitemap.json');
+
+      if (fsSync.existsSync(sitemapPath)) {
+        let _sitemap = JSON.parse(fsSync.readFileSync(sitemapPath, 'utf-8'));
+        const overrideInfo = _.pick(module, ['module', 'label', 'path', 'url']);
+        Object.assign(_sitemap, overrideInfo);
+
+        if (sitemap[_sitemap.module]) {
+          throw new Error(`Duplicate module name: ${_sitemap.module}`);
+        }
+
+        sitemap[_sitemap.module] = _sitemap;
+
+        if (module.mode === 'app') {
+          if (!_sitemap.url) {
+            throw new Error(`"url" is required for micro-app submodule: ${_sitemap.module}`);
+          }
+        } else {
+          if (!_sitemap.path) {
+            throw new Error(`"path" is required for non-independent submodule: ${_sitemap.module}`);
+          }
+        }
+      }
+
+      if (module.mode !== 'app') {
+        if (module.i18n) {
+          module.i18n.forEach((ns) => i18nNamespaces.add(ns));
+
+          if (module.mode === 'package') {
+            i18nToCopy.push(`./node_modules/${module.importPath}/dist`);
+          } else if (module.i18nExtracts) {
+            i18nToExtract.push(_.mapValues(module.i18nExtracts, (value) => path.join(mainRoot, value)));
+          }
+        }
+
+        subRouters[module.path] = {
+          importPath: module.importPath,
+          defaultRoute: module.defaultRoute,
+          isLazy: module.isLazy,
+        };
+
+        // copy assets into main app
+        const moduleConfigFile = path.resolve(moduleRoot, 'grafton-module.json');
+        if (fsSync.existsSync(moduleConfigFile)) {
+          const { assets } = JSON.parse(fsSync.readFileSync(moduleConfigFile, 'utf-8'));
+
+          if (assets) {
+            const fromEntity = `module "${module.importPath}"`;
+            copyAssets(assets, moduleRoot, process.cwd(), fromEntity);
+          }
+        }
+      }
+    }
+  });
+
+  fsSync.writeFileSync(
+    './public/sitemap.json',
+    JSON.stringify(
+      _.reduce(
+        sitemap,
+        (result, obj) => {
+          result.push(obj);
+          return result;
+        },
+        []
+      ),
+      null,
+      2
+    )
+  );
+  console.log('Sitemap generated in "./public/sitemap.json"');
+
+  return { subRouters, i18nToCopy, i18nToExtract, i18nNamespaces: Array.from(i18nNamespaces) };
+};
+
 /**
  * Vite plugin to generate routes based on the file system structure.
  */
@@ -23,6 +164,7 @@ export default function generateRoutesPlugin(options = {}) {
   const {
     root = 'src', // Default to 'src' if not specified
     routesDir = 'pages',
+    runtimePagesDir = 'runtime_modules',
     subRouters,
     enabled = true,
   } = options;
@@ -93,7 +235,7 @@ export default function generateRoutesPlugin(options = {}) {
         }
 
         let importPath =
-          (nodeModule ? subRouters[nodeModule].importPath : '.') +
+          (nodeModule ? moduleMap[rootDir].importPath : '.') +
           `/${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
         if (importPath.endsWith('.jsx')) {
           importPath = importPath.slice(0, -4);
@@ -124,16 +266,29 @@ export default function generateRoutesPlugin(options = {}) {
     const routesPath = path.resolve(sourcePath, routesDir);
     moduleMap[routesPath] = { sourcePath, isRoot, key: nodeModule };
 
+    if (nodeModule) {
+      moduleMap[routesPath].pathName = _.kebabCase(nodeModule);
+      moduleMap[routesPath].importPath = './' + path.join(runtimePagesDir, moduleMap[routesPath].pathName);
+    }
+
     const outputFile = isRoot
       ? path.resolve(sourcePath, 'routes.runtime.jsx')
       : nodeModule
-        ? path.resolve(rootPath, `sub-routes-${_.kebabCase(nodeModule)}.runtime.jsx`)
+        ? path.resolve(rootPath, `sub-routes-${moduleMap[routesPath].pathName}.runtime.jsx`)
         : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
 
     const routes = await buildRoutes(routesPath, routesPath, isRoot, '/', nodeModule);
     //console.dir(routes, { depth: null });
 
     const fileContent = generateRoutesFileContent(routes, isRoot ? subRouters : undefined, isRoot);
+
+    if (nodeModule) {
+      // copy page files from node_modules into runtimePagesDir/_.kebabCase(nodeModule)
+      const runtimePagesPath = path.resolve(rootPath, moduleMap[routesPath].importPath, routesDir);
+
+      await fs.mkdir(runtimePagesPath, { recursive: true });
+      await fs.cp(routesPath, runtimePagesPath, { force: true, recursive: true });
+    }
 
     await fs.writeFile(outputFile, fileContent, 'utf-8');
     console.log(`Generated ${outputFile}`);
@@ -157,10 +312,8 @@ export default function generateRoutesPlugin(options = {}) {
         if (isLocalModule(routeInfo)) {
           importPath = path.join(root, routeInfo.importPath);
         } else {
-          const mainFile = resolve.sync(routeInfo.importPath, { basedir: rootPath });
-          const { path: pkgJsonPath } = readPackageUpSync({ cwd: path.dirname(mainFile) });
-          const packageRoot = path.dirname(pkgJsonPath);
-          importPath = path.join(packageRoot, root);
+          const packageRoot = getPackageRoot(routeInfo.importPath, rootPath);
+          importPath = routeInfo.root ? path.join(packageRoot, routeInfo.root) : packageRoot; // ;
           nodeModule = key;
         }
 
