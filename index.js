@@ -108,12 +108,18 @@ export const processSubModules = (subModules, mainRoot = 'src') => {
 
       if (module.mode !== 'app') {
         if (module.i18n) {
-          module.i18n.forEach((ns) => i18nNamespaces.add(ns));
-
           if (module.mode === 'package') {
-            i18nToCopy.push(`./node_modules/${module.importPath}/dist`);
-          } else if (module.i18nExtracts) {
+            module.i18n.forEach((ns) => i18nNamespaces.add(ns));
+            i18nToCopy.push(`./node_modules/${module.importPath}`);
+          } else {
+            throw new Error(`"i18n" is only supported for "package" mode. Module: ${module.importPath}`);
+          } 
+        } else if (module.i18nExtracts) {
+          if (module.mode === 'builtin') {
+            Object.keys(module.i18nExtracts).forEach((ns) => i18nNamespaces.add(ns));
             i18nToExtract.push(_.mapValues(module.i18nExtracts, (value) => path.join(mainRoot, value)));
+          } else {
+            throw new Error(`"i18nExtracts" is only supported for "builtin" mode. Module: ${module.importPath}`);
           }
         }
 

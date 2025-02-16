@@ -1,11 +1,12 @@
 {
   "name": "vite-plugin-file-based-react-router",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Vite plugin to generate file-based routes for react-router",
   "main": "index.js",
   "type": "module",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "author": "Rockie Guo <rockie@kitmi.com.au>",
   "repository": {
