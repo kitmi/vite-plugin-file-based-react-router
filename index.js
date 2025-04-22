@@ -1,8 +1,12 @@
-import fsSync, { promises as fs } from 'fs';
-import path from 'path';
-import _ from 'lodash';
-import resolve from 'resolve';
-import { readPackageUpSync } from 'read-package-up';
+import fsSync, { promises as fs } from "fs";
+import path from "path";
+import _ from "lodash";
+import resolve from "resolve";
+import { readPackageUpSync } from "read-package-up";
+
+// for grafton-based app only, not mandatory
+const graftonAppConfigFile = "./grafton-app.json";
+const graftonAppLocalConfigFile = "./grafton-app.local.json";
 
 function splitLast(str, separator) {
   const lastIndex = str.lastIndexOf(separator);
@@ -12,63 +16,92 @@ function splitLast(str, separator) {
   ];
 }
 
-const trimStart = (str, starting) => (str && str.startsWith(starting) ? str.substring(starting.length) : str);
+const trimStart = (str, starting) =>
+  str && str.startsWith(starting) ? str.substring(starting.length) : str;
 
-const isLocalModule = (subModule) => subModule.importPath.startsWith('.') || subModule.importPath.startsWith('/');
+const isLocalModule = (subModule) =>
+  subModule.importPath.startsWith(".") || subModule.importPath.startsWith("/");
 
 const getPackageRoot = (packageImport, rootPath) => {
   const mainFile = resolve.sync(packageImport, { basedir: rootPath });
-  const { path: pkgJsonPath } = readPackageUpSync({ cwd: path.dirname(mainFile) });
+  const { path: pkgJsonPath } = readPackageUpSync({
+    cwd: path.dirname(mainFile),
+  });
   return path.dirname(pkgJsonPath);
 };
 
-export const copyAssets = (list, srcBase, destBase, fromEntity) => {
+const isDir = (path) => fsSync.statSync(path).isDirectory();
+
+const copyAssets = (list, srcBase, destBase, fromEntity) => {
   if (list) {
     _.each(list, (dest, src) => {
-      const destPath = path.resolve(destBase, dest);
-      const alreadyExist = fsSync.existsSync(destPath);
-      fsSync.mkdirSync(path.dirname(destPath), { recursive: true });
-      fsSync.copyFileSync(path.resolve(srcBase, src), destPath);
-      if (alreadyExist && fromEntity) {
-        console.log(`Overrided "${destPath}" from ${fromEntity}`);
-      } else {
-        console.log(`Copied "${destPath}"` + (fromEntity ? ` from ${fromEntity}` : ''));
-      }
+      _.castArray(dest).forEach((_dest) => {
+        const destPath = path.resolve(destBase, _dest);
+        const alreadyExist = fsSync.existsSync(destPath);
+        fsSync.mkdirSync(path.dirname(destPath), { recursive: true });
+        fsSync.copyFileSync(path.resolve(srcBase, src), destPath);
+        if (alreadyExist && fromEntity) {
+          console.log(`Overrided "${destPath}" from ${fromEntity}`);
+        } else {
+          console.log(
+            `Copied "${destPath}"` + (fromEntity ? ` from ${fromEntity}` : "")
+          );
+        }
+      });
     });
   }
 };
 
-export const generateRuntimeConfig = (i18nNamespaces, svgIcons) => {
+const generateRuntimeConfig = (
+  i18nNamespaces,
+  { app, i18n, sentry, svgIcons, services }
+) => {
   // Saved i18n namespaces and svgicon prefix into runtime config
-  const runtimeConfigFile = './src/runtime.config.json';
-  let runtimeConfig;
+  const runtimeConfigFile = "./src/tailwind-runtime.config.json";
+  let runtimeConfig = {};
 
-  if (fsSync.existsSync(runtimeConfigFile)) {
-    runtimeConfig = JSON.parse(fsSync.readFileSync(runtimeConfigFile, 'utf-8'));
-  } else {
-    runtimeConfig = {};
+  if (!fsSync.existsSync(runtimeConfigFile)) {
+    throw new Error("Tailwind runtime file not found!");
   }
 
-  runtimeConfig.i18n = { ns: i18nNamespaces };
+  runtimeConfig.app = app.name;
+  runtimeConfig.pathLanding = app.landingPage;
+  runtimeConfig.pathError = app.errorPage;
+  if (app.loginPage) {
+    runtimeConfig.pathLogin = app.loginPage;
+  }
+  if (app.logoutPage) {
+    runtimeConfig.pathLogout = app.logoutPage;
+  }
+  runtimeConfig.i18n = { ...i18n, ns: ["common", ...i18nNamespaces] };
+  runtimeConfig.sentry = sentry;
+  runtimeConfig.services = services;
   runtimeConfig.svgIconPrefix = svgIcons.symbolIdPrefix;
-  fsSync.writeFileSync('./src/runtime.config.json', JSON.stringify(runtimeConfig, null, 2));
+  runtimeConfig.tailwind = JSON.parse(
+    fsSync.readFileSync(runtimeConfigFile, "utf-8")
+  );
+
+  fsSync.writeFileSync(
+    "./src/runtime.config.json",
+    JSON.stringify(runtimeConfig, null, 2)
+  );
   console.log('"i18n" namespaces updated in "./src/runtime.config.json"');
 };
 
-export const processSubModules = (subModules, mainRoot = 'src') => {
+const processSubModules = (subModules, mainRoot = "src") => {
   const rootPath = path.resolve(mainRoot);
 
   const sitemap = {};
   const subRouters = {};
   const i18nNamespaces = new Set();
-  const i18nToCopy = ['./node_modules/@xgent/grafton/dist'];
+  const i18nToCopy = ["./node_modules/@xgent/grafton/dist"];
   const i18nToExtract = [];
 
   subModules.forEach((module) => {
     if (module.enabled) {
       const isLocal = isLocalModule(module);
 
-      if (module.mode === 'builtin') {
+      if (module.mode === "builtin") {
         if (!isLocal) {
           throw new Error(
             `Built-in module path must be a relative path to "${mainRoot}". Module: ${module.importPath}`
@@ -76,18 +109,26 @@ export const processSubModules = (subModules, mainRoot = 'src') => {
         }
       } else {
         if (isLocal) {
-          throw new Error(`External module path must be a package name. Module: ${module.importPath}`);
+          throw new Error(
+            `External module path must be a package name. Module: ${module.importPath}`
+          );
         }
       }
 
       // merge sitemap and extract sub-routers settings
-      const moduleRoot = isLocal ? path.join(rootPath, module.importPath) : getPackageRoot(module.importPath, rootPath);
-      const sitemapPath = path.resolve(moduleRoot, 'sitemap.json');
+      const moduleRoot = isLocal
+        ? path.join(rootPath, module.importPath)
+        : getPackageRoot(module.importPath, rootPath);
+      const sitemapPath = path.resolve(moduleRoot, "sitemap.json");
 
       if (fsSync.existsSync(sitemapPath)) {
-        let _sitemap = JSON.parse(fsSync.readFileSync(sitemapPath, 'utf-8'));
-        const overrideInfo = _.pick(module, ['module', 'label', 'path', 'url']);
+        let _sitemap = JSON.parse(fsSync.readFileSync(sitemapPath, "utf-8"));
+        const overrideInfo = _.pick(module, ["module", "label", "path", "url"]);
         Object.assign(_sitemap, overrideInfo);
+
+        if (module.defaultRoute) {
+          _sitemap.defaultPage = module.defaultRoute;
+        }
 
         if (sitemap[_sitemap.module]) {
           throw new Error(`Duplicate module name: ${_sitemap.module}`);
@@ -95,44 +136,69 @@ export const processSubModules = (subModules, mainRoot = 'src') => {
 
         sitemap[_sitemap.module] = _sitemap;
 
-        if (module.mode === 'app') {
+        if (module.mode === "app") {
           if (!_sitemap.url) {
-            throw new Error(`"url" is required for micro-app submodule: ${_sitemap.module}`);
+            throw new Error(
+              `"url" is required for micro-app submodule: ${_sitemap.module}`
+            );
           }
         } else {
           if (!_sitemap.path) {
-            throw new Error(`"path" is required for non-independent submodule: ${_sitemap.module}`);
+            throw new Error(
+              `"path" is required for non-independent submodule: ${_sitemap.module}`
+            );
           }
         }
       }
 
-      if (module.mode !== 'app') {
+      if (module.mode !== "app") {
         if (module.i18n) {
-          if (module.mode === 'package') {
+          if (module.mode === "package" || module.mode === "assets") {
             module.i18n.forEach((ns) => i18nNamespaces.add(ns));
             i18nToCopy.push(`./node_modules/${module.importPath}`);
           } else {
-            throw new Error(`"i18n" is only supported for "package" mode. Module: ${module.importPath}`);
-          } 
+            throw new Error(
+              `"i18n" is only supported by "package" and "assets" mode. Module: ${module.importPath}`
+            );
+          }
         } else if (module.i18nExtracts) {
-          if (module.mode === 'builtin') {
-            Object.keys(module.i18nExtracts).forEach((ns) => i18nNamespaces.add(ns));
-            i18nToExtract.push(_.mapValues(module.i18nExtracts, (value) => path.join(mainRoot, value)));
+          if (module.mode === "builtin") {
+            Object.keys(module.i18nExtracts).forEach((ns) =>
+              i18nNamespaces.add(ns)
+            );
+            i18nToExtract.push(
+              _.mapValues(module.i18nExtracts, (value) =>
+                path.join(mainRoot, value)
+              )
+            );
           } else {
-            throw new Error(`"i18nExtracts" is only supported for "builtin" mode. Module: ${module.importPath}`);
+            throw new Error(
+              `"i18nExtracts" is only supported for "builtin" mode. Module: ${module.importPath}`
+            );
           }
         }
 
-        subRouters[module.path] = {
-          importPath: module.importPath,
-          defaultRoute: module.defaultRoute,
-          isLazy: module.isLazy,
-        };
+        if (module.mode !== "assets") {
+          subRouters[module.path] = {
+            importPath: module.importPath,
+            defaultRoute: module.defaultRoute,
+            isLazy: module.isLazy,
+          };
+        } else if (module.mode !== "assets") {
+          throw new Error(
+            `"sitemap.json" not found in "${module.mode}" module "${module.importPath}"`
+          );
+        }
 
         // copy assets into main app
-        const moduleConfigFile = path.resolve(moduleRoot, 'grafton-module.json');
+        const moduleConfigFile = path.resolve(
+          moduleRoot,
+          "grafton-module.json"
+        );
         if (fsSync.existsSync(moduleConfigFile)) {
-          const { assets } = JSON.parse(fsSync.readFileSync(moduleConfigFile, 'utf-8'));
+          const { assets } = JSON.parse(
+            fsSync.readFileSync(moduleConfigFile, "utf-8")
+          );
 
           if (assets) {
             const fromEntity = `module "${module.importPath}"`;
@@ -144,7 +210,7 @@ export const processSubModules = (subModules, mainRoot = 'src') => {
   });
 
   fsSync.writeFileSync(
-    './public/sitemap.json',
+    "./public/sitemap.json",
     JSON.stringify(
       _.reduce(
         sitemap,
@@ -160,34 +226,125 @@ export const processSubModules = (subModules, mainRoot = 'src') => {
   );
   console.log('Sitemap generated in "./public/sitemap.json"');
 
-  return { subRouters, i18nToCopy, i18nToExtract, i18nNamespaces: Array.from(i18nNamespaces) };
+  return {
+    subRouters,
+    i18nToCopy,
+    i18nToExtract,
+    i18nNamespaces: Array.from(i18nNamespaces),
+  };
 };
+
+export function processGraftonAppConfig() {
+  const isGraftonApp = fsSync.existsSync(graftonAppConfigFile);
+  if (isGraftonApp) {
+    const hasLocal = fsSync.existsSync(graftonAppLocalConfigFile);
+    const graftonConfigPath = hasLocal
+      ? graftonAppLocalConfigFile
+      : graftonAppConfigFile;
+    const graftonConfig = JSON.parse(
+      fs.readFileSync(graftonConfigPath, "utf-8")
+    );
+
+    const { subModules, svgIcons, assets } = graftonConfig;
+
+    if (assets) {
+      const cwd = process.cwd();
+      copyAssets(assets, cwd, cwd);
+    }
+
+    const { subRouters, i18nToCopy, i18nToExtract, i18nNamespaces } =
+      processSubModules(subModules);
+
+    generateRuntimeConfig(i18nNamespaces, graftonConfig);
+
+    return {
+      subRouters,
+      i18nToCopy,
+      i18nToExtract,
+      svgIcons,
+    };
+  }
+
+  return {};
+}
+
+export function ClosePlugin() {
+  return {
+    name: "ClosePlugin", // required, will show up in warnings and errors
+
+    // use this to catch errors when building
+    buildEnd(error) {
+      if (error) {
+        console.error("Error bundling");
+        console.error(error);
+        process.exit(1);
+      } else {
+        console.log("Build ended");
+      }
+    },
+
+    // use this to catch the end of a build without errors
+    closeBundle(id) {
+      console.log("Bundle closed");
+      process.exit(0);
+    },
+  };
+}
 
 /**
  * Vite plugin to generate routes based on the file system structure.
  */
 export default function generateRoutesPlugin(options = {}) {
   const {
-    root = 'src', // Default to 'src' if not specified
-    routesDir = 'pages',
-    runtimePagesDir = 'runtime_modules',
+    root = "src", // Default to 'src' if not specified
+    routesDir = "pages",
+    runtimePagesDir = "runtime_modules",
+    reactRouterLib = 'react-router-dom',
     subRouters,
     enabled = true,
+    enableSentry = false,
   } = options;
 
   const rootPath = path.resolve(root);
 
   const moduleMap = {};
-  let routesPattern = routesDir.startsWith('/') ? routesDir : `/${routesDir}`;
-  routesPattern = routesPattern.endsWith('/') ? routesPattern : `${routesPattern}/`;
+  let routesPattern = routesDir.startsWith("/") ? routesDir : `/${routesDir}`;
+  routesPattern = routesPattern.endsWith("/")
+    ? routesPattern
+    : `${routesPattern}/`;
+
+  // visit all pages
+  async function visitPages(dir, handleRouteFile, handleDir) {
+    let entries = await fs.readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        await handleDir(fullPath);
+        await visitPages(fullPath);
+      } else if (entry.isFile() && isRouteFile(entry.name)) {
+        await handleRouteFile(fullPath);
+      }
+    }
+  }
 
   /**
    * Recursively build routes from the directory structure.
+   * @param {string} rootDir - The root directory of the routes.
+   * @param {string} currentDir - The current directory to process.
+   * @param {boolean} isRoot - Whether the current directory is the root.
+   * @param {string} parentPath - The parent path of the current directory.
+   * @returns {Promise<Array>} The generated routes.
    */
-  async function buildRoutes(rootDir, currentDir, isRoot, parentPath = '/', nodeModule) {
+  async function buildRoutes(rootDir, currentDir, isRoot, parentPath = "/") {
     let entries = await fs.readdir(currentDir, { withFileTypes: true });
     entries = entries.sort((a, b) =>
-      a.name < b.name || b.name.startsWith('_any.') ? -1 : a.name > b.name || a.name.startsWith('_any.') ? 1 : 0
+      a.name < b.name || b.name.startsWith("_any.")
+        ? -1
+        : a.name > b.name || a.name.startsWith("_any.")
+        ? 1
+        : 0
     );
 
     let routes = [];
@@ -200,37 +357,42 @@ export default function generateRoutesPlugin(options = {}) {
       if (entry.isDirectory()) {
         // Handle route groups (pattern to exclude from URL path)
         if (isRouteGroup(entry.name)) {
-          const children = await buildRoutes(rootDir, fullPath, isRoot, parentPath, nodeModule);
+          const children = await buildRoutes(
+            rootDir,
+            fullPath,
+            isRoot,
+            parentPath
+          );
           routes = routes.concat(children);
         } else {
-          const children = await buildRoutes(rootDir, fullPath, isRoot, routePath, nodeModule);
+          const children = await buildRoutes(
+            rootDir,
+            fullPath,
+            isRoot,
+            routePath
+          );
           routes.push({
             path: routePath,
             children,
           });
         }
       } else if (entry.isFile() && isRouteFile(entry.name)) {
-        const isLoader = entry.name.endsWith('.loader_.js');
-        const isAnyDeeper = entry.name.startsWith('_any.');
-        const isLazy = entry.name.endsWith('.lazy_.jsx');
-        const isIndex = entry.name.startsWith('index.');
-        const isLayout = entry.name.startsWith('_layout.');
-        const isError = entry.name.startsWith('_error.');
+        const isAnyDeeper = entry.name.startsWith("_any.");
+        const isLazy = entry.name.endsWith(".lazy_.jsx");
+        const isIndex = entry.name.startsWith("index.");
+        const isLayout = entry.name.startsWith("_layout.");
+        const isError = entry.name.startsWith("_error.");
 
-        let componentName = generateComponentName(relativePath, isLoader);
+        let componentName = generateComponentName(relativePath);
         if (isError) {
-          componentName += 'Boundary';
+          componentName += "Boundary";
         }
 
         if (isIndex) {
-          if (entry.name !== 'index.jsx' && entry.name !== 'index.lazy_.jsx' && entry.name !== 'index.loader_.js') {
-            throw new Error(`Index route does not support flat mode. File: ${fullPath}`);
-          }
-        }
-
-        if (isAnyDeeper) {
-          if (isLoader) {
-            throw new Error(`"/*" route does not support loader. File: ${fullPath}`);
+          if (entry.name !== "index.jsx" && entry.name !== "index.lazy_.jsx") {
+            throw new Error(
+              `Index route does not support flat mode. File: ${fullPath}`
+            );
           }
         }
 
@@ -240,20 +402,23 @@ export default function generateRoutesPlugin(options = {}) {
           );
         }
 
-        let importPath =
-          (nodeModule ? moduleMap[rootDir].importPath : '.') +
-          `/${path.join(routesDir, relativePath).replace(/\\/g, '/')}`;
-        if (importPath.endsWith('.jsx')) {
+        let importPath = `./${path
+          .join(routesDir, relativePath)
+          .replace(/\\/g, "/")}`;
+        if (importPath.endsWith(".jsx")) {
           importPath = importPath.slice(0, -4);
-        } else if (importPath.endsWith('.js')) {
+        } else if (importPath.endsWith(".js")) {
           importPath = importPath.slice(0, -3);
         }
 
         const route = {
-          path: isAnyDeeper ? routePath + (routePath.endsWith('/') ? '*' : '/*') : isIndex ? parentPath : routePath,
+          path: isAnyDeeper
+            ? routePath + (routePath.endsWith("/") ? "*" : "/*")
+            : isIndex
+            ? parentPath
+            : routePath,
           element: componentName,
           importPath,
-          isLoader,
           isLazy,
           isLayout,
           isError,
@@ -268,43 +433,473 @@ export default function generateRoutesPlugin(options = {}) {
     return routes;
   }
 
-  async function buildRoutesFromDirectory(sourcePath, isRoot, nodeModule) {
+  /**
+   * Build routes from the directory and generate the routes file.
+   * @param {*} sourcePath
+   * @param {*} isRoot
+   */
+  async function buildRoutesFromDirectory(sourcePath, isRoot) {
     const routesPath = path.resolve(sourcePath, routesDir);
-    moduleMap[routesPath] = { sourcePath, isRoot, key: nodeModule };
-
-    if (nodeModule) {
-      moduleMap[routesPath].pathName = _.kebabCase(nodeModule);
-      moduleMap[routesPath].importPath = './' + path.join(runtimePagesDir, moduleMap[routesPath].pathName);
-    }
+    moduleMap[routesPath] = { sourcePath, isRoot };
 
     const outputFile = isRoot
-      ? path.resolve(sourcePath, 'routes.runtime.jsx')
-      : nodeModule
-        ? path.resolve(rootPath, `sub-routes-${moduleMap[routesPath].pathName}.runtime.jsx`)
-        : path.resolve(sourcePath, 'sub-routes.runtime.jsx');
+      ? path.resolve(sourcePath, "router.runtime.jsx")
+      : path.resolve(sourcePath, "sub-routes.runtime.jsx");
 
-    const routes = await buildRoutes(routesPath, routesPath, isRoot, '/', nodeModule);
-    //console.dir(routes, { depth: null });
+    const routes = await buildRoutes(routesPath, routesPath, isRoot, "/");
 
-    const fileContent = generateRoutesFileContent(routes, isRoot ? subRouters : undefined, isRoot);
+    const fileContent = generateRoutesFileContent(
+      routes,
+      isRoot ? subRouters : undefined,
+      isRoot,
+      enableSentry
+    ).replace(/\\/g, "/");
 
-    if (nodeModule) {
-      // copy page files from node_modules into runtimePagesDir/_.kebabCase(nodeModule)
-      const runtimePagesPath = path.resolve(rootPath, moduleMap[routesPath].importPath, routesDir);
-
-      await fs.mkdir(runtimePagesPath, { recursive: true });
-      await fs.cp(routesPath, runtimePagesPath, { force: true, recursive: true });
-    }
-
-    await fs.writeFile(outputFile, fileContent, 'utf-8');
+    await fs.writeFile(outputFile, fileContent, "utf-8");
     console.log(`Generated ${outputFile}`);
   }
 
+  /**
+   * Generate the content of the routes.runtime.jsx file.
+   */
+  function generateRoutesFileContent(routes, subRoutes, isRoot, enableSentry) {
+    let importStatements = "";
+    let lazyImports = "";
+    const importSet = new Set();
+    const routeMergeMap = {};
+
+    function findNearestParent(start) {
+      if (routeMergeMap[start]) {
+        return start;
+      }
+
+      if (start === "/") {
+        return "/";
+      }
+
+      let [parentPath] = splitLast(start, "/");
+      if (!parentPath) {
+        parentPath = "/";
+      }
+
+      return findNearestParent(parentPath);
+    }
+
+    function processRoutes(routes) {
+      const routeDefinitions = [];
+      const _deferred = [];
+
+      for (const route of routes) {
+        const routeDef = {};
+        let merged = false;
+        let isNode = false;
+
+        const {
+          path,
+          element,
+          importPath,
+          isLazy,
+          isLayout,
+          isError,
+          isIndex,
+          children,
+        } = route;
+
+        // 处理路径或索引
+        routeDef.path = path;
+
+        let [parentPath] = splitLast(routeDef.path, "/");
+        if (!parentPath) {
+          parentPath = "/";
+        }
+
+        // 处理元素
+        if (importPath && element) {
+          const componentName = element;
+
+          if (isError) {
+            // 处理错误元素
+            if (!importSet.has(importPath)) {
+              if (isLazy) {
+                lazyImports += `const ${componentName} = React.lazy(() => import('${importPath}'));\n`;
+              } else {
+                importStatements += `import ${componentName} from '${importPath}';\n`;
+              }
+              importSet.add(importPath);
+            }
+
+            if (routeMergeMap[routeDef.path]) {
+              routeMergeMap[
+                routeDef.path
+              ].errorElement = `<${componentName} />`;
+              merged = true;
+            } else {
+              // 将 errorElement 分配给当前路由
+              routeDef.errorElement = `<${componentName} />`;
+              routeMergeMap[routeDef.path] = routeDef;
+            }
+          } else if (isLayout) {
+            // 处理布局和 handle
+            const handleName = `handle${componentName}`;
+            if (!importSet.has(importPath)) {
+              importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
+              importSet.add(importPath);
+            }
+
+            if (routeMergeMap[routeDef.path]) {
+              routeMergeMap[routeDef.path].element = `<${componentName} />`;
+              routeMergeMap[routeDef.path].handle = handleName;
+              merged = true;
+            } else {
+              routeDef.element = `<${componentName} />`;
+              routeDef.handle = handleName;
+              routeMergeMap[routeDef.path] = routeDef;
+            }
+          } else if (isLazy) {
+            // 处理懒加载组件
+            if (!importSet.has(importPath)) {
+              lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
+              importSet.add(importPath);
+            }
+            routeDef.lazy = "lazy" + componentName;
+            isNode = true;
+          } else {
+            // 普通组件
+            const handleName = `handle${componentName}`;
+            if (!importSet.has(importPath)) {
+              importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
+              importSet.add(importPath);
+            }
+            routeDef.element = `<${componentName} />`;
+            routeDef.handle = handleName;
+            isNode = true;
+          }
+        }
+
+        // 处理子路由
+        if (children && children.length > 0) {
+          if (routeMergeMap[routeDef.path]) {
+            routeMergeMap[routeDef.path].children = processRoutes(children);
+          } else {
+            routeMergeMap[routeDef.path] = routeDef;
+            const moreChildren = processRoutes(children);
+            routeDef.children = [...(routeDef.children || []), ...moreChildren];
+
+            if (!routeMergeMap[parentPath]) {
+              _deferred.push({ parentPath, routeDef });
+            } else {
+              routeMergeMap[parentPath].children = [
+                ...(routeMergeMap[parentPath].children || []),
+                routeDef,
+              ];
+            }
+          }
+
+          merged = true;
+        }
+
+        if (isNode) {
+          let p = parentPath;
+
+          if (isIndex) {
+            routeDef.index = true;
+            p = routeDef.path;
+            delete routeDef.path;
+          }
+
+          const _parentPath = findNearestParent(p);
+          routeMergeMap[_parentPath].children = [
+            ...(routeMergeMap[_parentPath].children || []),
+            routeDef,
+          ];
+        } else if (!merged) {
+          // 添加到路由定义数组
+          routeDefinitions.push(routeDef);
+        }
+      }
+
+      if (_deferred.length > 0) {
+        for (const { parentPath, routeDef } of _deferred) {
+          routeMergeMap[parentPath].children = [
+            ...(routeMergeMap[parentPath].children || []),
+            routeDef,
+          ];
+        }
+      }
+
+      return routeDefinitions;
+    }
+
+    const _routes = processRoutes(routes);
+
+    if (subRoutes) {
+      for (let _path in subRoutes) {
+        const routeInfo = subRoutes[_path];
+
+        const componentName =
+          _.upperFirst(_.camelCase(_path.replace(/\//g, "-"))) + "Any";
+        const importPath =
+          "./" +
+          (isLocalModule(routeInfo)
+            ? routeInfo.importPath + "/sub-routes.runtime"
+            : runtimePagesDir +
+              "/" +
+              _.kebabCase(_path) +
+              "/sub-routes.runtime");
+
+        let routeDef = {
+          path: _path,
+        };
+
+        if (routeInfo.isLazy) {
+          if (!routeInfo.defaultRoute || routeInfo.defaultRoute === "/") {
+            throw new Error(
+              `Default route is required for lazy sub-routes: "${_path}" and it should not be "/".`
+            );
+          }
+
+          lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
+          const redirectPath = path
+            .join(_path, routeInfo.defaultRoute)
+            .replace(/\\/g, "/");
+          routeDef.children = `[{ index: true, element: <Navigate to='${redirectPath}' /> }]`;
+          routeDef.handle = `{ lazyRouting: lazy${componentName} }`;
+        } else {
+          importStatements += `import ${componentName} from '${importPath}';\n`;
+          routeDef.element = `<${componentName} />`;
+        }
+
+        importSet.add(importPath);
+
+        if (routeMergeMap[_path]) {
+          throw new Error(`Duplicate route path: ${_path}`);
+        }
+
+        const _parentPath = findNearestParent(_path);
+        routeMergeMap[_parentPath].children = [
+          ...(routeMergeMap[_parentPath].children || []),
+          routeDef,
+        ];
+      }
+    }
+
+    const routesArray = tidyRoutes(_routes, isRoot);
+
+    // 生成路由配置的字符串表示
+    const routeDefsString = JSON.stringify(routesArray, null, 2)
+      // 处理 element 属性，移除引号
+      .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
+      .replace(/"lazy": "([^"]+)"/g, '"lazy": $1')
+      // 处理 errorElement 属性
+      .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
+      // 处理 handle 属性
+      .replace(/("handle":\s*)"({[^"]*})"/g, "$1$2")
+      .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
+      // 移除 element 为 null 的情况
+      .replace(/"element": null,\n/g, "")
+      // 移除 JSX 元素周围的引号
+      .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, "$1")
+      // 移除 children 为字符串的情况
+      .replace(/"children": "([^"]+)"/g, '"children": $1');
+    let fileContent;
+
+    if (isRoot) {
+      let createRouter;
+
+      if (enableSentry) {
+        importStatements += `import { createBrowserRouter,
+    createRoutesFromChildren,
+    matchRoutes,
+    useLocation,
+    useNavigationType, 
+    Navigate,
+} from '${reactRouterLib}';
+import { Runtime } from '@xgent/grafton';
+import * as Sentry from '@sentry/react';\n`;
+
+        createRouter = `let _createBrowserRouter;
+
+const sentryConfig = Runtime.config.sentry;
+if (!Runtime.isDevMode && sentryConfig && sentryConfig.dsn) {
+    Sentry.init({
+        integrations: [
+            Sentry.browserTracingIntegration(), 
+            Sentry.replayIntegration(),
+            Sentry.reactRouterV7BrowserTracingIntegration({
+                useEffect: React.useEffect,
+                useLocation,
+                useNavigationType,
+                createRoutesFromChildren,
+                matchRoutes,
+            }),
+        ],
+        tracesSampleRate: 1.0, 
+        replaysSessionSampleRate: 0.1, 
+        replaysOnErrorSampleRate: 1.0, 
+        ...sentryConfig,
+    });
+
+    Runtime.sentry = Sentry;
+
+    _createBrowserRouter = Sentry.wrapCreateBrowserRouterV7(
+        createBrowserRouter,
+    );
+} else {
+    _createBrowserRouter = createBrowserRouter;
+}
+
+const router = _createBrowserRouter(routes, { patchRoutesOnNavigation: lazyRouting });\n`;
+      } else {
+        importStatements += `import { createBrowserRouter, Navigate } from '${reactRouterLib}';\n`;
+        createRouter = `const router = createBrowserRouter(routes, { patchRoutesOnNavigation: lazyRouting });\n`;
+      }
+
+      // 生成最终的文件内容
+      fileContent = `import React from 'react';
+${importStatements}
+${lazyImports}
+export const lazyRouting = async ({ patch, matches }) => {
+    let leafRoute = matches[matches.length - 1]?.route;
+
+    if (leafRoute?.handle?.lazyRouting) {
+        const { default: children } = await leafRoute.handle.lazyRouting();
+        patch(leafRoute.id, children);
+    }
+};
+
+const routes = ${routeDefsString};
+
+${createRouter}
+export default router;
+`;
+    } else {
+      fileContent = `import React from 'react';
+${importStatements}
+${lazyImports}
+const subRoutes = ${routeDefsString};
+
+export default subRoutes;
+`;
+    }
+
+    return fileContent;
+  }
+
+  async function copyPages(routesPath, runtimePagesPath, key) {
+    await fs.rm(runtimePagesPath, { recursive: true, force: true });
+    await fs.mkdir(runtimePagesPath, { recursive: true });
+
+    async function handleRouteFile(fullPath) {
+      await copyPageFile(routesPath, runtimePagesPath, fullPath, key);
+    }
+
+    async function handleDir(fullPath) {
+      const relativePath = path.relative(routesPath, fullPath);
+      const newDir = path.resolve(runtimePagesPath, relativePath);
+      await fs.mkdir(newDir, { recursive: true });
+    }
+
+    await visitPages(routesPath, handleRouteFile, handleDir);
+    console.log(`Sub-module pages copied ${routesPath} -> ${runtimePagesPath}`);
+  }
+
+  async function copyPageFile(
+    srcRootPath,
+    destRootPath,
+    fullPath,
+    key,
+    singleFile
+  ) {
+    const relativePath = path.relative(srcRootPath, fullPath);
+    const newFile = path.resolve(destRootPath, relativePath);
+
+    if (singleFile) {
+      if (!fsSync.existsSync(fullPath)) {
+        await fs.unlink(newFile);
+        console.log(`Removed page ${newFile}`);
+        return;
+      }
+    }
+    const content = await fs.readFile(fullPath, "utf-8");
+    const newContent = content.replace(
+      /import\s+(\{\s*.+\s*\})\s+from\s+['"]@package@([^'"]*)['"]/g,
+      (match, component, importPath) => {
+        return `import ${component} from '${subRouters[key].importPath}${importPath}'`;
+      }
+    );
+
+    await fs.writeFile(newFile, newContent, "utf-8");
+    if (singleFile) {
+      console.log(`Updated page ${newFile}`);
+    }
+  }
+
+  let preBuildDone = false;
+
+  async function preBuild(isDevServer) {
+    for (let key in subRouters) {
+      const routeInfo = subRouters[key];
+
+      if (!isLocalModule(routeInfo)) {
+        const packageRoot = getPackageRoot(routeInfo.importPath, rootPath);
+        const importPath = routeInfo.root
+          ? path.join(packageRoot, routeInfo.root)
+          : packageRoot; // ;
+        const srcRoutesPath = path.resolve(importPath, routesDir);
+
+        const newImportPath =
+          "./" + path.join(runtimePagesDir, _.kebabCase(key));
+        const runtimePagesPath = path.resolve(
+          rootPath,
+          newImportPath,
+          routesDir
+        );
+
+        await copyPages(srcRoutesPath, runtimePagesPath, key);
+
+        if (isDevServer) {
+          (async () => {
+            const watcher = fs.watch(srcRoutesPath, { recursive: true });
+            for await (const event of watcher) {
+              const fullPath = path.resolve(srcRoutesPath, event.filename);
+              if (!isDir(fullPath)) {
+                //console.log(`[detected change] ${event.eventType}: ${fullPath}`);
+                await copyPageFile(
+                  srcRoutesPath,
+                  runtimePagesPath,
+                  fullPath,
+                  key,
+                  true
+                );
+              }
+            }
+          })();
+        }
+      }
+    }
+
+    preBuildDone = true;
+    console.log("Pre-build done");
+  }
+
   return {
-    name: 'vite-plugin-file-based-react-router',
+    name: "vite-plugin-file-based-react-router",
+
+    async configureServer() {
+      if (!enabled) {
+        return;
+      }
+
+      await preBuild(true);
+    },
+
     async buildStart() {
       if (!enabled) {
         return;
+      }
+
+      if (!preBuildDone) {
+        await preBuild(false);
       }
 
       await buildRoutesFromDirectory(root, true);
@@ -312,18 +907,15 @@ export default function generateRoutesPlugin(options = {}) {
       for (let key in subRouters) {
         const routeInfo = subRouters[key];
 
-        let importPath;
-        let nodeModule;
+        let sourcePath;
 
         if (isLocalModule(routeInfo)) {
-          importPath = path.join(root, routeInfo.importPath);
+          sourcePath = path.join(root, routeInfo.importPath);
         } else {
-          const packageRoot = getPackageRoot(routeInfo.importPath, rootPath);
-          importPath = routeInfo.root ? path.join(packageRoot, routeInfo.root) : packageRoot; // ;
-          nodeModule = key;
+          sourcePath = path.join(root, runtimePagesDir, _.kebabCase(key));
         }
 
-        await buildRoutesFromDirectory(importPath, false, nodeModule);
+        await buildRoutesFromDirectory(sourcePath, false);
       }
     },
 
@@ -333,10 +925,10 @@ export default function generateRoutesPlugin(options = {}) {
         const modulePath = id.substring(0, pos + routesPattern.length - 1);
         const mdouleInfo = moduleMap[modulePath];
         if (mdouleInfo != null) {
+          //console.log(`[watch change] ${id}`);
           await buildRoutesFromDirectory(
             mdouleInfo.sourcePath,
-            mdouleInfo.isRoot,
-            mdouleInfo.isRoot || isLocalModule(mdouleInfo) ? undefined : mdouleInfo.key
+            mdouleInfo.isRoot
           );
         }
       }
@@ -351,27 +943,30 @@ function buildRoutePath(name, parentPath) {
   let routeSegment = name;
 
   // Remove file extension
-  routeSegment = routeSegment.replace(/\.lazy_\.jsx$/, '');
-  routeSegment = routeSegment.replace(/\.loader_\.js$/, '');
-  routeSegment = routeSegment.replace(/\.jsx$/, '');
+  routeSegment = routeSegment.replace(/\.lazy_\.jsx$/, "");
+  routeSegment = routeSegment.replace(/\.jsx$/, "");
 
   // Handle special files
-  if (routeSegment === 'index') {
+  if (routeSegment === "index") {
     return parentPath;
   }
-  if (routeSegment === '_layout' || routeSegment === '_error' || routeSegment === '_any') {
+  if (
+    routeSegment === "_layout" ||
+    routeSegment === "_error" ||
+    routeSegment === "_any"
+  ) {
     return parentPath;
   }
 
   // Handle parameterized routes
-  routeSegment = routeSegment.replace(/\[(.+?)\]/g, ':$1');
+  routeSegment = routeSegment.replace(/\[(.+?)\]/g, ":$1");
 
   // Handle nested routes using '.'
-  routeSegment = routeSegment.replace(/\./g, '/');
+  routeSegment = routeSegment.replace(/\./g, "/");
 
   // Build the full route path
   const fullPath = path.posix.join(parentPath, routeSegment);
-  return fullPath.startsWith('/') ? fullPath : `/${fullPath}`;
+  return fullPath.startsWith("/") ? fullPath : `/${fullPath}`;
 }
 
 /**
@@ -387,35 +982,38 @@ function isRouteGroup(name) {
  * Check if a file should be treated as a route file.
  */
 function isRouteFile(name) {
-  return name.endsWith('.jsx') || name.endsWith('.loader_.js');
+  return name.endsWith(".jsx");
 }
 
 /**
  * Generate a unique component name based on the file path.
  */
-function generateComponentName(relativePath, isLoader) {
+function generateComponentName(relativePath) {
   let componentName = relativePath
-    .replace(/[\/\\]/g, '_')
-    .replace(/\.lazy_\.jsx$/, '')
-    .replace(/\.jsx$/, '')
-    .replace(/\.js$/, '')
+    .replace(/[\/\\]/g, "_")
+    .replace(/\.lazy_\.jsx$/, "")
+    .replace(/\.jsx$/, "")
+    .replace(/\.js$/, "")
     //.replace(/_any$/, '')
-    .replace(/\[(.+?)\]/g, '$1')
-    .replace(/[^a-zA-Z0-9_]/g, '');
+    .replace(/\[(.+?)\]/g, "$1")
+    .replace(/[^a-zA-Z0-9_]/g, "");
 
   componentName = _.camelCase(componentName);
-
-  if (isLoader) {
-    return componentName;
-  }
 
   return _.upperFirst(componentName);
 }
 
-const KEY_ORDERS = ['index', 'path', 'element', 'errorElement', 'loader', 'handle', 'lazy'];
+const KEY_ORDERS = [
+  "index",
+  "path",
+  "element",
+  "errorElement",
+  "handle",
+  "lazy",
+];
 
-function tidyRoutes(routes, isRoot, parentPath = '/') {
-  if (typeof routes === 'string') return routes;
+function tidyRoutes(routes, isRoot, parentPath = "/") {
+  if (typeof routes === "string") return routes;
 
   return routes
     .map((route) => {
@@ -424,23 +1022,30 @@ function tidyRoutes(routes, isRoot, parentPath = '/') {
       for (const key of KEY_ORDERS) {
         if (key in route) {
           orderedRoute[key] = route[key];
-          if (!isRoot && key === 'path') {
-            orderedRoute[key] = trimStart(orderedRoute[key], '/');
+          if (!isRoot && key === "path") {
+            orderedRoute[key] = trimStart(
+              trimStart(orderedRoute[key], parentPath),
+              "/"
+            );
           }
         }
       }
 
       if (route.children && route.children.length > 0) {
         // for path only routes, move children to parent
-        if (Object.keys(orderedRoute).length === 1 && 'path' in orderedRoute) {
-          const [onlyChild] = tidyRoutes(route.children, isRoot);
+        if (Object.keys(orderedRoute).length === 1 && "path" in orderedRoute) {
+          const [onlyChild] = tidyRoutes(route.children, isRoot, parentPath);
           if (onlyChild.index) {
             delete onlyChild.index;
             onlyChild.path = orderedRoute.path;
           }
           return onlyChild;
         } else {
-          orderedRoute.children = tidyRoutes(route.children, isRoot, route.path);
+          orderedRoute.children = tidyRoutes(
+            route.children,
+            isRoot,
+            route.path
+          );
         }
       }
 
@@ -455,284 +1060,26 @@ function tidyRoutes(routes, isRoot, parentPath = '/') {
         return 1;
       }
 
-      const trimL = parentPath === '/' ? 1 : parentPath.length + 1;
+      const trimL = parentPath === "/" ? 1 : parentPath.length + 1;
       let aPath = a.path.substring(trimL);
       let bPath = b.path.substring(trimL);
 
-      if (aPath.startsWith(':') && !bPath.startsWith(':')) {
+      if (aPath.startsWith(":") && !bPath.startsWith(":")) {
         return 1;
       }
 
-      if (aPath.indexOf(':') !== -1 && bPath.indexOf(':') === -1) {
+      if (aPath.indexOf(":") !== -1 && bPath.indexOf(":") === -1) {
         return 1;
       }
 
-      if (bPath.startsWith(':') && !aPath.startsWith(':')) {
+      if (bPath.startsWith(":") && !aPath.startsWith(":")) {
         return -1;
       }
 
-      if (bPath.indexOf(':') !== -1 && aPath.indexOf(':') === -1) {
+      if (bPath.indexOf(":") !== -1 && aPath.indexOf(":") === -1) {
         return -1;
       }
 
       return 0;
     });
-}
-
-/**
- * Generate the content of the routes.runtime.jsx file.
- */
-function generateRoutesFileContent(routes, subRoutes, isRoot) {
-  let importStatements = '';
-  let lazyImports = '';
-  const importSet = new Set();
-  const routeMergeMap = {};
-
-  function findNearestParent(start) {
-    if (routeMergeMap[start]) {
-      return start;
-    }
-
-    if (start === '/') {
-      return '/';
-    }
-
-    let [parentPath] = splitLast(start, '/');
-    if (!parentPath) {
-      parentPath = '/';
-    }
-
-    return findNearestParent(parentPath);
-  }
-
-  function processRoutes(routes) {
-    const routeDefinitions = [];
-    const _deferred = [];
-
-    for (const route of routes) {
-      const routeDef = {};
-      let merged = false;
-      let isNode = false;
-
-      const { path, element, importPath, isLazy, isLoader, isLayout, isError, isIndex, isAnyDeeper, children } = route;
-
-      // 处理路径或索引
-      routeDef.path = path;
-
-      let [parentPath] = splitLast(routeDef.path, '/');
-      if (!parentPath) {
-        parentPath = '/';
-      }
-
-      // 处理元素
-      if (importPath && element) {
-        const componentName = element;
-
-        if (isLoader) {
-          // 处理加载器
-          if (!importSet.has(importPath)) {
-            importStatements += `import ${componentName} from '${importPath}';\n`;
-            importSet.add(importPath);
-          }
-          routeDef.loader = componentName;
-          isNode = true;
-        } else if (isError) {
-          // 处理错误元素
-          if (!importSet.has(importPath)) {
-            if (isLazy) {
-              lazyImports += `const ${componentName} = React.lazy(() => import('${importPath}'));\n`;
-            } else {
-              importStatements += `import ${componentName} from '${importPath}';\n`;
-            }
-            importSet.add(importPath);
-          }
-
-          if (routeMergeMap[routeDef.path]) {
-            routeMergeMap[routeDef.path].errorElement = `<${componentName} />`;
-            merged = true;
-          } else {
-            // 将 errorElement 分配给当前路由
-            routeDef.errorElement = `<${componentName} />`;
-            routeMergeMap[routeDef.path] = routeDef;
-          }
-        } else if (isLayout) {
-          // 处理布局和 handle
-          const handleName = `handle${componentName}`;
-          if (!importSet.has(importPath)) {
-            importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
-            importSet.add(importPath);
-          }
-
-          if (routeMergeMap[routeDef.path]) {
-            routeMergeMap[routeDef.path].element = `<${componentName} />`;
-            routeMergeMap[routeDef.path].handle = handleName;
-            merged = true;
-          } else {
-            routeDef.element = `<${componentName} />`;
-            routeDef.handle = handleName;
-            routeMergeMap[routeDef.path] = routeDef;
-          }
-        } else if (isLazy) {
-          // 处理懒加载组件
-          if (!importSet.has(importPath)) {
-            lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
-            importSet.add(importPath);
-          }
-          routeDef.lazy = 'lazy' + componentName;
-          isNode = true;
-        } else {
-          // 普通组件
-          const handleName = `handle${componentName}`;
-          if (!importSet.has(importPath)) {
-            importStatements += `import { Component as ${componentName}, handle as ${handleName} } from '${importPath}';\n`;
-            importSet.add(importPath);
-          }
-          routeDef.element = `<${componentName} />`;
-          routeDef.handle = handleName;
-          isNode = true;
-        }
-      }
-
-      // 处理子路由
-      if (children && children.length > 0) {
-        if (routeMergeMap[routeDef.path]) {
-          routeMergeMap[routeDef.path].children = processRoutes(children);
-        } else {
-          routeMergeMap[routeDef.path] = routeDef;
-          const moreChildren = processRoutes(children);
-          routeDef.children = [...(routeDef.children || []), ...moreChildren];
-
-          if (!routeMergeMap[parentPath]) {
-            _deferred.push({ parentPath, routeDef });
-          } else {
-            routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
-          }
-        }
-
-        merged = true;
-      }
-
-      if (isNode) {
-        let p = parentPath;
-
-        if (isIndex) {
-          routeDef.index = true;
-          p = routeDef.path;
-          delete routeDef.path;
-        }
-
-        const _parentPath = findNearestParent(p);
-        routeMergeMap[_parentPath].children = [...(routeMergeMap[_parentPath].children || []), routeDef];
-      } else if (!merged) {
-        // 添加到路由定义数组
-        routeDefinitions.push(routeDef);
-      }
-    }
-
-    if (_deferred.length > 0) {
-      for (const { parentPath, routeDef } of _deferred) {
-        routeMergeMap[parentPath].children = [...(routeMergeMap[parentPath].children || []), routeDef];
-      }
-    }
-
-    return routeDefinitions;
-  }
-
-  const _routes = processRoutes(routes);
-
-  if (subRoutes) {
-    for (let _path in subRoutes) {
-      const routeInfo = subRoutes[_path];
-
-      const componentName = _.upperFirst(_.camelCase(_path.replace(/\//g, '-'))) + 'Any';
-      const importPath =
-        './' +
-        (isLocalModule(routeInfo)
-          ? path.join(routeInfo.importPath, 'sub-routes.runtime')
-          : `sub-routes-${_.kebabCase(_path)}.runtime`);
-
-      let routeDef = {
-        path: _path,
-      };
-
-      if (routeInfo.isLazy) {
-        if (!routeInfo.defaultRoute || routeInfo.defaultRoute === '/') {
-          throw new Error(`Default route is required for lazy sub-routes: "${_path}" and it should not be "/".`);
-        }
-        if (!importSet.has('react-router-dom')) {
-          importStatements += `import { redirect } from 'react-router-dom';\n`;
-          importSet.add('react-router-dom');
-        }
-
-        lazyImports += `const lazy${componentName} = () => import('${importPath}');\n`;
-        const redirectPath = path.join(_path, routeInfo.defaultRoute).replace(/\\/g, '/');
-        routeDef.children = `[{ index: true, loader: () => redirect('${redirectPath}') }]`;
-        routeDef.handle = `{ lazyRouting: lazy${componentName} }`;
-      } else {
-        importStatements += `import ${componentName} from '${importPath}';\n`;
-        routeDef.element = `<${componentName} />`;
-      }
-
-      importSet.add(importPath);
-
-      if (routeMergeMap[_path]) {
-        throw new Error(`Duplicate route path: ${_path}`);
-      }
-
-      const _parentPath = findNearestParent(_path);
-      routeMergeMap[_parentPath].children = [...(routeMergeMap[_parentPath].children || []), routeDef];
-    }
-  }
-
-  const routesArray = tidyRoutes(_routes, isRoot);
-
-  // 生成路由配置的字符串表示
-  const routeDefsString = JSON.stringify(routesArray, null, 2)
-    // 处理 element 属性，移除引号
-    .replace(/"element": "(<[^"]+>)"/g, '"element": $1')
-    .replace(/"lazy": "([^"]+)"/g, '"lazy": $1')
-    // 处理 errorElement 属性
-    .replace(/"errorElement": "(<[^"]+>)"/g, '"errorElement": $1')
-    // 处理 loader 属性
-    .replace(/"loader": "([a-zA-Z0-9_]+)"/g, '"loader": $1')
-    // 处理 handle 属性
-    .replace(/("handle":\s*)"({[^"]*})"/g, '$1$2')
-    .replace(/"handle": "([a-zA-Z0-9_]+)"/g, '"handle": $1')
-    // 移除 element 为 null 的情况
-    .replace(/"element": null,\n/g, '')
-    // 移除 JSX 元素周围的引号
-    .replace(/"<([^"]+)>"(?=\s*(,|\}))/g, '$1')
-    // 移除 children 为字符串的情况
-    .replace(/"children": "([^"]+)"/g, '"children": $1');
-  let fileContent;
-
-  if (isRoot) {
-    // 生成最终的文件内容
-    fileContent = `import React from 'react';
-${importStatements}
-${lazyImports}
-export const lazyRouting = async ({ patch, matches }) => {
-  let leafRoute = matches[matches.length - 1]?.route;
-
-  if (leafRoute?.handle?.lazyRouting) {
-    const { default: children } = await leafRoute.handle.lazyRouting();
-    patch(leafRoute.id, children);
-  }
-};
-
-const routes = ${routeDefsString};
-
-export default routes;
-`;
-  } else {
-    fileContent = `import React from 'react';
-${importStatements}
-${lazyImports}
-const subRoutes = ${routeDefsString};
-
-export default subRoutes;
-`;
-  }
-
-  return fileContent;
 }
