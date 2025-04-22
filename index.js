@@ -242,7 +242,7 @@ export function processGraftonAppConfig() {
       ? graftonAppLocalConfigFile
       : graftonAppConfigFile;
     const graftonConfig = JSON.parse(
-      fs.readFileSync(graftonConfigPath, "utf-8")
+      fsSync.readFileSync(graftonConfigPath, "utf-8")
     );
 
     const { subModules, svgIcons, assets } = graftonConfig;
