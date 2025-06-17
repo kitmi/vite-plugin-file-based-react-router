@@ -72,7 +72,7 @@ const copyAssets = (list, srcBase, destBase, fromEntity) => {
 
 const generateRuntimeConfig = (
     i18nNamespaces,
-    { app, i18n, sentry, svgIcons, services, tailwind, subModules },
+    { app, i18n, svgIcons, tailwind, subModules, ...others },
     pkgJson
 ) => {
     // Saved i18n namespaces and svgicon prefix into runtime config
@@ -83,8 +83,7 @@ const generateRuntimeConfig = (
         app: app.name,
         ...otherOpts,
         i18n: { ...i18n, ns: [...i18n.ns, ...i18nNamespaces] },
-        sentry,
-        services,
+        ...others,
         svgIconPrefix: svgIcons.symbolIdPrefix,
     };
 
