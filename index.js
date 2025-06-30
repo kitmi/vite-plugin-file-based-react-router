@@ -137,10 +137,10 @@ const generateRuntimeConfig = (
     console.log('Generated "./src/runtime.config.json"');
 };
 
-const processSubModules = (subModules, mainRoot = 'src') => {
+const processSubModules = (subModules, rootSitemap, mainRoot = 'src') => {
     const rootPath = path.resolve(mainRoot);
 
-    const sitemap = {};
+    const sitemap = rootSitemap ? { [rootSitemap.module]: rootSitemap } : {};
     const subRouters = {};
     const i18nNamespaces = new Set();
     const i18nToCopy = ['./node_modules/@xgent/grafton/dist'];
@@ -292,14 +292,14 @@ export function processGraftonAppConfig() {
             Object.assign(graftonConfig, JSON.parse(fsSync.readFileSync(graftonAppLocalConfigFile, 'utf-8')))
         }        
 
-        const { subModules, svgIcons, assets } = graftonConfig;
+        const { subModules, svgIcons, assets, sitemap } = graftonConfig;
 
         if (assets) {
             const cwd = process.cwd();
             copyAssets(assets, cwd, cwd);
         }
 
-        const { subRouters, i18nToCopy, i18nToExtract, i18nNamespaces } = processSubModules(subModules);
+        const { subRouters, i18nToCopy, i18nToExtract, i18nNamespaces } = processSubModules(subModules, sitemap);
 
         generateRuntimeConfig(i18nNamespaces, graftonConfig, pkgJson);
 
